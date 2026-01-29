@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Le Cercle — Guidance Augmentée</title>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { 
+      font-family: 'Cormorant Garamond', Georgia, serif;
+      background: linear-gradient(135deg, #0a0a12 0%, #1a1a2e 50%, #16213e 100%);
+      min-height: 100vh;
+      color: #e8e6e3;
+    }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    @keyframes pulse { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
+    textarea:focus { outline: none; border-color: #c9a959 !important; }
+    textarea::placeholder { color: rgba(196, 180, 160, 0.4); font-style: italic; }
+    input[type="range"] { -webkit-appearance: none; height: 6px; background: rgba(201, 169, 89, 0.3); border-radius: 3px; cursor: pointer; }
+    input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; background: linear-gradient(135deg, #c9a959 0%, #8b7355 100%); border-radius: 50%; cursor: pointer; }
+    .spiral { width: 40px; height: 40px; margin: 12px auto; border: 2px solid transparent; border-top-color: #c9a959; border-radius: 50%; animation: spin 8s linear infinite; }
+    .loading-spiral { width: 60px; height: 60px; border: 3px solid transparent; border-top-color: #c9a959; border-right-color: rgba(201, 169, 89, 0.5); border-radius: 50%; animation: spin 1.5s linear infinite; }
+    .control-bar { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(10, 10, 18, 0.98); border-top: 2px solid rgba(201, 169, 89, 0.4); padding: 10px 20px; z-index: 1000; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    function App() {
+      const [currentView, setCurrentView] = useState('collect');
+      const [rawInput, setRawInput] = useState('');
+      const [narratorNotes, setNarratorNotes] = useState('');
+      const [isAnalyzing, setIsAnalyzing] = useState(false);
+      const [isGenerating, setIsGenerating] = useState(false);
+      const [error, setError] = useState('');
+      const [dispatch, setDispatch] = useState(null);
+      const [generatedGuidance, setGeneratedGuidance] = useState('');
+      const [musicSuggestions, setMusicSuggestions] = useState([]);
+      const [duration, setDuration] = useState(35);
+      
+      const [timerRunning, setTimerRunning] = useState(false);
+      const [elapsedSeconds, setElapsedSeconds] = useState(0);
+      const timerRef = useRef(null);
+
+      const [scrolling, setScrolling] = useState(false);
+      const [scrollSpeed, setScrollSpeed] = useState(0.5);
+      const scrollIntervalRef = useRef(null);
+      const passedBlocksRef = useRef(new Set());
+
+      useEffect(() => {
+        if (timerRunning) {
+          timerRef.current = setInterval(() => {
+            setElapsedSeconds(prev => prev + 1);
+          }, 1000);
+        } else {
+          clearInterval(timerRef.current);
+        }
+        return () => clearInterval(timerRef.current);
+      }, [timerRunning]);
+
+      useEffect(() => {
+        if (scrolling) {
+          scrollIntervalRef.current = setInterval(() => {
+            const blocks = document.querySelectorAll('[data-pause-id]');
+            const stopPosition = 120;
+            
+            for (let i = 0; i < blocks.length; i++) {
+              const blockId = blocks[i].getAttribute('data-pause-id');
+              if (passedBlocksRef.current.has(blockId)) continue;
+              
+              const rect = blocks[i].getBoundingClientRect();
+              if (rect.top <= stopPosition && rect.top > 0) {
+                passedBlocksRef.current.add(blockId);
+                setScrolling(false);
+                return;
+              }
+            }
+            
+            window.scrollBy({ top: scrollSpeed, behavior: 'auto' });
+          }, 50);
+        } else {
+          if (scrollIntervalRef.current) clearInterval(scrollIntervalRef.current);
+        }
+        return () => { if (scrollIntervalRef.current) clearInterval(scrollIntervalRef.current); };
+      }, [scrolling, scrollSpeed]);
+
+      const formatTime = (totalSeconds) => {
+        const mins = Math.floor(totalSeconds / 60);
+        const secs = totalSeconds % 60;
+        return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+      };
+
+      const resetTimer = () => {
+        setTimerRunning(false);
+        setElapsedSeconds(0);
+      };
+
+      const analyzeAndDispatch = async () => {
+        if (!rawInput.trim() && !narratorNotes.trim()) {
+          setError('Veuillez entrer au moins quelques éléments');
+          return;
+        }
+        
+        setIsAnalyzing(true);
+        setError('');
+
+        try {
+          const response = await fetch('/api/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              action: 'analyze',
+              rawInput, 
+              narratorNotes 
+            })
+          });
+
+          if (!response.ok) {
+            throw new Error('Erreur d\'analyse');
+          }
+
+          const data = await response.json();
+          setDispatch(data.dispatch);
+          
+          // Suggestions musicales basées sur le mainWorld
+          const music = [];
+          const world = data.dispatch.mainWorld;
+          if (world === 'grotte') {
+            music.push({ search: "deep cave drone ambient 1 hour", description: "Drone souterrain" });
+          } else if (world === 'forêt') {
+            music.push({ search: "deep forest ambient 1 hour", description: "Forêt profonde" });
+          } else if (world === 'mer') {
+            music.push({ search: "ocean waves meditation 1 hour", description: "Vagues océan" });
+          } else if (world === 'montagne') {
+            music.push({ search: "tibetan singing bowls 1 hour", description: "Bols tibétains" });
+          } else if (world === 'désert') {
+            music.push({ search: "desert wind ambient meditation", description: "Vent du désert" });
+          }
+          music.push({ search: "shamanic drum journey 1 hour", description: "Voyage chamanique" });
+          
+          setMusicSuggestions(music);
+          setCurrentView('review');
+        } catch (err) {
+          setError('Erreur lors de l\'analyse. Réessayez.');
+        } finally {
+          setIsAnalyzing(false);
+        }
+      };
+
+      const generateGuidance = async () => {
+        setError('');
+        setCurrentView('generating');
+        setIsGenerating(true);
+        resetTimer();
+        setScrolling(false);
+        passedBlocksRef.current = new Set();
+
+        try {
+          const response = await fetch('/api/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              action: 'generate',
+              dispatch, 
+              duration 
+            })
+          });
+
+          if (!response.ok) {
+            throw new Error('Erreur de génération');
+          }
+
+          const data = await response.json();
+          setGeneratedGuidance(data.guidance);
+          setCurrentView('result');
+        } catch (err) {
+          setError('Erreur lors de la génération. Réessayez.');
+          setCurrentView('review');
+        } finally {
+          setIsGenerating(false);
+        }
+      };
+
+      const resetAll = () => {
+        setRawInput('');
+        setNarratorNotes('');
+        setDispatch(null);
+        setGeneratedGuidance('');
+        setMusicSuggestions([]);
+        setError('');
+        setDuration(35);
+        setCurrentView('collect');
+        resetTimer();
+        setScrolling(false);
+        passedBlocksRef.current = new Set();
+      };
+
+      const editDispatch = (field, value) => {
+        setDispatch(prev => ({ ...prev, [field]: value }));
+      };
+
+      const renderGuidanceText = (text) => {
+        const elements = [];
+        const lines = text.split('\n');
+        
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          
+          if (line.startsWith('===TAMBOUR|')) {
+            const content = line.replace('===TAMBOUR|', '').replace(/===$/g, '');
+            const parts = content.split('|');
+            const id = parts[0];
+            const duree = parts[1];
+            const titre = parts[2];
+            const instructions = parts[3];
+            const mots = parts.slice(4);
+            
+            elements.push(
+              <div 
+                key={`tambour-${id}`}
+                data-pause-id={`tambour-${id}`}
+                style={{
+                  background: 'linear-gradient(135deg, rgba(120, 70, 30, 0.6) 0%, rgba(80, 50, 20, 0.7) 100%)',
+                  border: '4px solid rgba(220, 160, 80, 0.8)',
+                  borderRadius: '16px',
+                  padding: '20px',
+                  margin: '30px 0',
+                  textAlign: 'center',
+                  boxShadow: '0 0 20px rgba(200, 140, 60, 0.3)'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '15px', marginBottom: '12px' }}>
+                  <span style={{ fontSize: '2.5rem' }}>🥁</span>
+                  <div>
+                    <div style={{ fontSize: '1.4rem', color: '#ffd080', fontWeight: '600' }}>{titre}</div>
+                    <div style={{ fontSize: '1.1rem', color: 'rgba(255, 210, 150, 0.9)' }}>{duree} minutes</div>
+                  </div>
+                </div>
+                <div style={{ 
+                  fontSize: '0.95rem', 
+                  color: 'rgba(240, 210, 160, 0.9)', 
+                  fontStyle: 'italic',
+                  marginBottom: '12px',
+                  padding: '10px',
+                  background: 'rgba(0,0,0,0.2)',
+                  borderRadius: '8px'
+                }}>
+                  {instructions}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', justifyContent: 'center' }}>
+                  {mots.map((mot, idx) => (
+                    <span key={idx} style={{
+                      fontSize: '1rem',
+                      color: '#ffe0a0',
+                      fontStyle: 'italic',
+                      padding: '5px 12px',
+                      background: 'rgba(200, 150, 80, 0.2)',
+                      borderRadius: '15px',
+                      border: '1px solid rgba(220, 170, 100, 0.3)'
+                    }}>{mot}</span>
+                  ))}
+                </div>
+              </div>
+            );
+            continue;
+          }
+          
+          if (line.startsWith('===SILENCE|')) {
+            const content = line.replace('===SILENCE|', '').replace(/===$/g, '');
+            const parts = content.split('|');
+            const id = parts[0];
+            const duree = parts[1];
+            const description = parts[2];
+            
+            elements.push(
+              <div 
+                key={`silence-${id}`}
+                data-pause-id={`silence-${id}`}
+                style={{
+                  background: 'rgba(80, 80, 100, 0.3)',
+                  border: '3px solid rgba(150, 150, 180, 0.5)',
+                  borderRadius: '12px',
+                  padding: '20px',
+                  margin: '25px 0',
+                  textAlign: 'center'
+                }}
+              >
+                <div style={{ fontSize: '2rem', marginBottom: '8px' }}>🤫</div>
+                <div style={{ fontSize: '1.2rem', color: 'rgba(210, 210, 230, 0.95)', fontWeight: '500' }}>
+                  {description}
+                </div>
+                <div style={{ fontSize: '1rem', color: 'rgba(180, 180, 210, 0.8)', marginTop: '5px' }}>
+                  {duree} minutes
+                </div>
+              </div>
+            );
+            continue;
+          }
+          
+          if (line.match(/\[≈?\s*\d+:\d+\]/)) {
+            elements.push(
+              <div key={`time-${i}`} style={{
+                display: 'inline-block',
+                background: 'rgba(201, 169, 89, 0.25)',
+                padding: '8px 16px',
+                borderRadius: '20px',
+                fontSize: '0.95rem',
+                color: '#c9a959',
+                marginBottom: '12px',
+                marginTop: '30px',
+                fontWeight: '600'
+              }}>
+                {line}
+              </div>
+            );
+            continue;
+          }
+          
+          if (line.trim() === '...') {
+            elements.push(
+              <div key={`pause-${i}`} style={{ 
+                textAlign: 'center', 
+                padding: '5px 0',
+                color: 'rgba(201, 169, 89, 0.35)',
+                fontSize: '1rem'
+              }}>
+                •
+              </div>
+            );
+            continue;
+          }
+          
+          if (!line.trim()) {
+            elements.push(<div key={`empty-${i}`} style={{ height: '0.5em' }}></div>);
+            continue;
+          }
+          
+          elements.push(
+            <p key={`text-${i}`} style={{ 
+              marginBottom: '0.7em', 
+              fontSize: '1.25rem', 
+              lineHeight: '1.9',
+              color: '#e8e6e3'
+            }}>
+              {line}
+            </p>
+          );
+        }
+        
+        return elements;
+      };
+
+      const buttonStyle = (variant = 'primary') => ({
+        padding: '14px 24px',
+        background: variant === 'primary' 
+          ? 'linear-gradient(135deg, rgba(201, 169, 89, 0.2) 0%, rgba(139, 115, 85, 0.3) 100%)'
+          : 'transparent',
+        border: '1px solid rgba(201, 169, 89, 0.6)',
+        borderRadius: '50px',
+        color: '#f4e4bc',
+        fontSize: '1rem',
+        fontFamily: "'Cormorant Garamond', Georgia, serif",
+        letterSpacing: '0.12em',
+        textTransform: 'uppercase',
+        cursor: 'pointer',
+      });
+
+      const labelStyle = {
+        display: 'block',
+        fontSize: '0.85rem',
+        fontWeight: '500',
+        color: '#c9a959',
+        marginBottom: '8px',
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase'
+      };
+
+      const textareaStyle = {
+        width: '100%',
+        padding: '14px',
+        background: 'rgba(255, 255, 255, 0.03)',
+        border: '1px solid rgba(201, 169, 89, 0.3)',
+        borderRadius: '8px',
+        color: '#e8e6e3',
+        fontSize: '1rem',
+        fontFamily: "'Cormorant Garamond', Georgia, serif",
+        resize: 'vertical',
+        outline: 'none',
+        boxSizing: 'border-box'
+      };
+
+      return (
+        <div style={{
+          minHeight: '100vh',
+          padding: '20px',
+          paddingBottom: currentView === 'result' ? '120px' : '20px'
+        }}>
+          <div style={{ maxWidth: '650px', margin: '0 auto' }}>
+            
+            <header style={{ textAlign: 'center', marginBottom: '25px', paddingTop: '10px' }}>
+              <h1 style={{
+                fontSize: '2rem',
+                fontWeight: '300',
+                letterSpacing: '0.12em',
+                background: 'linear-gradient(180deg, #f4e4bc 0%, #c9a959 50%, #8b7355 100%)',
+                WebkitBackgroundClip: 'text',
+                WebkitTextFillColor: 'transparent',
+                marginBottom: '5px',
+                textTransform: 'uppercase'
+              }}>Le Cercle</h1>
+              <div className="spiral"></div>
+            </header>
+
+            {currentView === 'collect' && (
+              <div>
+                <div style={{ background: 'rgba(0, 0, 0, 0.2)', borderRadius: '10px', padding: '18px', marginBottom: '18px', border: '1px solid rgba(201, 169, 89, 0.2)' }}>
+                  <label style={labelStyle}>👥 Collecte du groupe</label>
+                  <textarea style={{ ...textareaStyle, minHeight: '140px' }} placeholder="forêt... peur... chaleur..." value={rawInput} onChange={(e) => setRawInput(e.target.value)} />
+                </div>
+
+                <div style={{ background: 'rgba(201, 169, 89, 0.06)', borderRadius: '10px', padding: '18px', marginBottom: '20px', border: '1px solid rgba(201, 169, 89, 0.2)' }}>
+                  <label style={labelStyle}>🔮 Vos impressions</label>
+                  <textarea style={{ ...textareaStyle, minHeight: '70px' }} placeholder="Le groupe semble..." value={narratorNotes} onChange={(e) => setNarratorNotes(e.target.value)} />
+                </div>
+
+                <div style={{ marginBottom: '20px' }}>
+                  <label style={labelStyle}>Durée : {duration} min</label>
+                  <input type="range" min="30" max="60" step="5" value={duration} onChange={(e) => setDuration(parseInt(e.target.value))} style={{ width: '100%' }} />
+                </div>
+
+                {error && <p style={{ color: '#e8a0a0', textAlign: 'center', marginBottom: '15px' }}>{error}</p>}
+
+                <button onClick={analyzeAndDispatch} disabled={isAnalyzing} style={{ ...buttonStyle(), width: '100%', opacity: isAnalyzing ? 0.6 : 1 }}>
+                  {isAnalyzing ? '⏳ Analyse...' : '✦ Analyser ✦'}
+                </button>
+              </div>
+            )}
+
+            {currentView === 'review' && dispatch && (
+              <div>
+                {[
+                  { key: 'theme', label: '🎯 Thème' },
+                  { key: 'symbols', label: '🌳 Symboles' },
+                  { key: 'sensations', label: '✋ Sensations' },
+                  { key: 'emotions', label: '💧 Émotions' },
+                  { key: 'keywords', label: '🔑 Mots-clés' },
+                  { key: 'narratorPerception', label: '🔮 Notes' }
+                ].map(({ key, label }) => (
+                  <div key={key} style={{ marginBottom: '14px' }}>
+                    <label style={labelStyle}>{label}</label>
+                    <textarea style={{ ...textareaStyle, minHeight: '45px' }} value={dispatch[key] || ''} onChange={(e) => editDispatch(key, e.target.value)} />
+                  </div>
+                ))}
+                
+                {error && <p style={{ color: '#e8a0a0', textAlign: 'center', marginBottom: '15px' }}>{error}</p>}
+                
+                <div style={{ display: 'flex', gap: '12px', marginTop: '20px' }}>
+                  <button onClick={() => setCurrentView('collect')} style={{ ...buttonStyle('secondary'), flex: '1' }}>← Retour</button>
+                  <button onClick={generateGuidance} disabled={isGenerating} style={{ ...buttonStyle(), flex: '2', opacity: isGenerating ? 0.6 : 1 }}>✦ Générer ✦</button>
+                </div>
+              </div>
+            )}
+
+            {currentView === 'generating' && (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '300px' }}>
+                <div className="loading-spiral" style={{ marginBottom: '25px' }}></div>
+                <p style={{ fontSize: '1.1rem', color: 'rgba(196, 180, 160, 0.8)', fontStyle: 'italic', animation: 'pulse 2s infinite' }}>Le voyage prend forme...</p>
+              </div>
+            )}
+
+            {currentView === 'result' && (
+              <>
+                {musicSuggestions.length > 0 && (
+                  <div style={{ padding: '12px', background: 'rgba(139, 115, 85, 0.1)', borderRadius: '10px', marginBottom: '18px' }}>
+                    <div style={{ fontSize: '0.85rem', color: '#c9a959', marginBottom: '8px' }}>🎵 Ambiance</div>
+                    {musicSuggestions.map((s, i) => (
+                      <a key={i} href={`https://www.youtube.com/results?search_query=${encodeURIComponent(s.search)}`} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', marginRight: '8px', padding: '6px 10px', background: 'rgba(0,0,0,0.3)', borderRadius: '5px', color: '#c9a959', textDecoration: 'none', fontSize: '0.85rem' }}>
+                        ▶ {s.description}
+                      </a>
+                    ))}
+                  </div>
+                )}
+
+                {dispatch?.narratorPerception && (
+                  <div style={{ padding: '12px', background: 'rgba(201, 169, 89, 0.06)', borderRadius: '8px', marginBottom: '18px' }}>
+                    <div style={{ fontSize: '0.85rem', color: '#c9a959', marginBottom: '6px' }}>🔮 Notes</div>
+                    <div style={{ fontSize: '0.95rem', color: 'rgba(232, 230, 227, 0.85)', fontStyle: 'italic' }}>{dispatch.narratorPerception}</div>
+                  </div>
+                )}
+
+                <div style={{ background: 'rgba(0, 0, 0, 0.2)', borderRadius: '10px', padding: '20px', marginBottom: '20px' }}>
+                  {renderGuidanceText(generatedGuidance)}
+                </div>
+
+                <button onClick={resetAll} style={{ ...buttonStyle('secondary'), width: '100%', marginBottom: '15px' }}>✦ Nouvelle séance ✦</button>
+              </>
+            )}
+          </div>
+
+          {currentView === 'result' && (
+            <div className="control-bar">
+              <div style={{ maxWidth: '650px', margin: '0 auto', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                
+                <button onClick={() => setScrolling(!scrolling)} style={{
+                  width: '55px', height: '55px', borderRadius: '50%',
+                  border: `3px solid ${scrolling ? 'rgba(255, 100, 100, 0.7)' : 'rgba(100, 255, 100, 0.7)'}`,
+                  background: scrolling ? 'rgba(180, 60, 60, 0.5)' : 'rgba(60, 180, 60, 0.5)',
+                  color: '#fff', fontSize: '1.4rem', cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
+                }}>
+                  {scrolling ? '⏸' : '▶'}
+                </button>
+                
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: '0.7rem', color: 'rgba(201, 169, 89, 0.5)', marginBottom: '3px' }}>Vitesse</div>
+                  <input type="range" min="0.1" max="2" step="0.05" value={scrollSpeed} onChange={(e) => setScrollSpeed(parseFloat(e.target.value))} style={{ width: '100%' }} />
+                </div>
+                
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                  <div style={{
+                    fontSize: '1.4rem',
+                    color: timerRunning ? '#c9a959' : 'rgba(232, 230, 227, 0.6)',
+                    fontFamily: "'Courier New', monospace",
+                    minWidth: '65px'
+                  }}>
+                    {formatTime(elapsedSeconds)}
+                  </div>
+                  <button onClick={() => setTimerRunning(!timerRunning)} style={{
+                    padding: '8px 12px',
+                    background: timerRunning ? 'rgba(180, 80, 80, 0.4)' : 'rgba(80, 180, 80, 0.4)',
+                    border: 'none', borderRadius: '6px',
+                    color: '#fff', fontSize: '0.9rem', cursor: 'pointer'
+                  }}>
+                    {timerRunning ? '⏸' : '▶'}
+                  </button>
+                  <button onClick={resetTimer} style={{
+                    padding: '8px 10px',
+                    background: 'rgba(255,255,255,0.1)',
+                    border: 'none', borderRadius: '6px',
+                    color: 'rgba(255,255,255,0.6)', fontSize: '0.8rem', cursor: 'pointer'
+                  }}>↺</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
